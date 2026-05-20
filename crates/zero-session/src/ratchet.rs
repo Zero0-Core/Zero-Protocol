@@ -19,35 +19,37 @@ impl DoubleRatchetState {
 
     /// Ratchets the sending chain using HKDF-BLAKE2s256 and returns a message key.
     pub fn ratchet_send(&mut self) -> [u8; 32] {
-        let (next_chain, msg_key) = Self::kdf_ratchet(&self.send_chain_key);
+        let (next_chain, msg_key) = Self::kdf_ratchet(&self.send_chain_key, 0x01);
         self.send_chain_key = next_chain;
         msg_key
     }
 
     /// Ratchets the receiving chain using HKDF-BLAKE2s256 and returns a message key.
     pub fn ratchet_recv(&mut self) -> [u8; 32] {
-        let (next_chain, msg_key) = Self::kdf_ratchet(&self.recv_chain_key);
+        let (next_chain, msg_key) = Self::kdf_ratchet(&self.recv_chain_key, 0x02);
         self.recv_chain_key = next_chain;
         msg_key
     }
 
     /// Performs the symmetric-key ratchet step.
     /// Returns (Next Chain Key, Message Key).
-    fn kdf_ratchet(chain_key: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+    fn kdf_ratchet(chain_key: &[u8; 32], direction_separator: u8) -> ([u8; 32], [u8; 32]) {
         // Signal uses HMAC-SHA256, we use HKDF-BLAKE2s256 to remain consistent with Zero Protocol.
         // Wait, HKDF requires a BlockSizeUser, but BLAKE2s doesn't natively support it in this rust version.
         // Instead, we use a custom domain-separated BLAKE2s KDF.
         let mut h_chain = Blake2s256::new();
+        h_chain.update(&[direction_separator]);
         h_chain.update(b"zero-ratchet-chain");
         h_chain.update(chain_key);
-        
+
         let mut h_msg = Blake2s256::new();
+        h_msg.update(&[direction_separator]);
         h_msg.update(b"zero-ratchet-message");
         h_msg.update(chain_key);
 
         let mut next_chain = [0u8; 32];
         let mut msg_key = [0u8; 32];
-        
+
         next_chain.copy_from_slice(&h_chain.finalize());
         msg_key.copy_from_slice(&h_msg.finalize());
 
@@ -111,8 +113,10 @@ mod tests {
         let send_key = state.ratchet_send();
         let recv_key = state.ratchet_recv();
         // Send and recv derive from the same root but with different domain separators
-        assert_ne!(send_key, recv_key,
-            "Send and recv chains must produce different keys even from same root");
+        assert_ne!(
+            send_key, recv_key,
+            "Send and recv chains must produce different keys even from same root"
+        );
     }
 
     #[test]
@@ -139,7 +143,13 @@ mod tests {
         let msg_key = s.ratchet_send();
         let after_chain = s.send_chain_key;
 
-        assert_ne!(msg_key, after_chain, "Message key must not equal the new chain key");
-        assert_ne!(before_chain, after_chain, "Chain key must advance after ratchet");
+        assert_ne!(
+            msg_key, after_chain,
+            "Message key must not equal the new chain key"
+        );
+        assert_ne!(
+            before_chain, after_chain,
+            "Chain key must advance after ratchet"
+        );
     }
 }

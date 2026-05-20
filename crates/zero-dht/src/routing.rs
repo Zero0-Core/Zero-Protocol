@@ -2,7 +2,7 @@ use crate::node::{DhtPublicKey, NodeInfo};
 use arrayvec::ArrayVec;
 use std::time::Instant;
 
-pub const K: usize = 20;        // k-bucket size
+pub const K: usize = 20; // k-bucket size
 pub const KEY_BITS: usize = 256;
 
 /// XOR Distance wrapper for Kademlia metric
@@ -68,7 +68,9 @@ impl RoutingTable {
     /// Finds the index of the bucket that should contain the given distance.
     pub fn find_bucket_index(&self, dist: &Distance) -> usize {
         let lz = dist.leading_zeros() as usize;
-        if lz == 256 { return 0; }
+        if lz == 256 {
+            return 0;
+        }
         std::cmp::min(lz, self.buckets.len() - 1)
     }
 
@@ -80,16 +82,24 @@ impl RoutingTable {
         }
 
         let mut idx = self.find_bucket_index(&dist);
-        
+
         // Anti-sybil subnet checking
         if let Some(subnet) = node.subnet_24() {
-            let count = self.buckets[idx].nodes.iter().filter(|n| n.subnet_24() == Some(subnet)).count();
+            let count = self.buckets[idx]
+                .nodes
+                .iter()
+                .filter(|n| n.subnet_24() == Some(subnet))
+                .count();
             if count >= 2 {
                 return false;
             }
         }
 
-        if let Some(existing) = self.buckets[idx].nodes.iter_mut().find(|n| n.dht_pk == node.dht_pk) {
+        if let Some(existing) = self.buckets[idx]
+            .nodes
+            .iter_mut()
+            .find(|n| n.dht_pk == node.dht_pk)
+        {
             existing.mark_seen();
             existing.addr = node.addr;
             return true;
@@ -101,7 +111,12 @@ impl RoutingTable {
         }
 
         // BUCKET IS FULL - Try Eviction First
-        if let Some((i, _)) = self.buckets[idx].nodes.iter().enumerate().find(|(_, n)| n.reputation < -10) {
+        if let Some((i, _)) = self.buckets[idx]
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.reputation < -10)
+        {
             self.buckets[idx].nodes[i] = node;
             return true;
         }
@@ -111,7 +126,7 @@ impl RoutingTable {
         // In this architecture, the bucket covering the local node is always the last bucket.
         if idx == self.buckets.len() - 1 && self.buckets.len() < KEY_BITS {
             self.split_bucket(idx);
-            
+
             // Re-evaluate index after split
             idx = self.find_bucket_index(&dist);
             if self.buckets[idx].nodes.len() < K {
@@ -119,33 +134,35 @@ impl RoutingTable {
                 return true;
             }
         }
-        
+
         false
     }
 
     fn split_bucket(&mut self, idx: usize) {
         let current_depth = idx;
         let mut new_bucket = KBucket::new((current_depth + 1) as u32);
-        
+
         // Redistribute nodes
         let mut keep = ArrayVec::new();
         for node in self.buckets[idx].nodes.drain(..) {
             let dist = Distance::calculate(&self.local_key, &node.dht_pk);
             let lz = dist.leading_zeros() as usize;
-            
+
             if lz == current_depth {
                 keep.push(node);
             } else {
                 let _ = new_bucket.nodes.push(node);
             }
         }
-        
+
         self.buckets[idx].nodes = keep;
         self.buckets.push(new_bucket);
     }
 
     pub fn find_closest(&self, target: &DhtPublicKey, count: usize) -> Vec<NodeInfo> {
-        let mut all_nodes: Vec<_> = self.buckets.iter()
+        let mut all_nodes: Vec<_> = self
+            .buckets
+            .iter()
             .flat_map(|b| b.nodes.iter().cloned())
             .map(|n| {
                 let dist = Distance::calculate(&n.dht_pk, target);
@@ -224,7 +241,10 @@ mod tests {
         rt.insert(node.clone());
 
         let total_nodes: usize = rt.buckets.iter().map(|b| b.nodes.len()).sum();
-        assert_eq!(total_nodes, 1, "Duplicate inserts should not add extra nodes");
+        assert_eq!(
+            total_nodes, 1,
+            "Duplicate inserts should not add extra nodes"
+        );
     }
 
     #[test]
@@ -239,7 +259,9 @@ mod tests {
             rt.insert(node);
         }
 
-        let same_subnet_count = rt.buckets.iter()
+        let same_subnet_count = rt
+            .buckets
+            .iter()
             .flat_map(|b| b.nodes.iter())
             .filter(|n| {
                 if let std::net::IpAddr::V4(ip) = n.addr.ip() {
@@ -250,7 +272,11 @@ mod tests {
             })
             .count();
 
-        assert!(same_subnet_count <= 2, "Anti-sybil: max 2 nodes per /24 subnet, got {}", same_subnet_count);
+        assert!(
+            same_subnet_count <= 2,
+            "Anti-sybil: max 2 nodes per /24 subnet, got {}",
+            same_subnet_count
+        );
     }
 
     #[test]
@@ -258,9 +284,10 @@ mod tests {
         let local = make_pk(0x00);
         let mut rt = RoutingTable::new(local);
 
-        // Insert nodes with different seeds; node 0x01 should be closer to 0x01 target
+        // Insert nodes with different seeds and subnets; node 0x01 should be closer to 0x01 target
         for i in 1u8..=5 {
-            rt.insert(make_node(i, i));
+            let addr: SocketAddr = format!("10.0.{}.1:33445", i).parse().unwrap();
+            rt.insert(NodeInfo::new(make_pk(i), addr));
         }
 
         let target = make_pk(0x01);
@@ -288,6 +315,9 @@ mod tests {
         let addr: std::net::SocketAddr = "10.99.0.1:33445".parse().unwrap();
         let new_node = NodeInfo::new(make_pk(0xFE), addr);
         let inserted = rt.insert(new_node);
-        assert!(inserted, "Bad-reputation node should be evicted for new node");
+        assert!(
+            inserted,
+            "Bad-reputation node should be evicted for new node"
+        );
     }
 }
