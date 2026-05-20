@@ -15,6 +15,8 @@ pub struct ZeroNode {
     pub transport: Arc<TransportSelector>,
     pub blob_store: Arc<Mutex<zero_offload::store::BlobStore>>,
     pub rate_limiters: Arc<Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>>,
+    pub lease_store: Arc<Mutex<HashMap<DhtPublicKey, zero_dht::node::LeaseSet>>>,
+    pub current_lease: Arc<Mutex<Option<zero_dht::node::LeaseSet>>>,
 }
 
 impl ZeroNode {
@@ -31,6 +33,8 @@ impl ZeroNode {
         let blob_store = Arc::new(Mutex::new(zero_offload::store::BlobStore::new()));
 
         let rate_limiters = Arc::new(Mutex::new(HashMap::new()));
+        let lease_store = Arc::new(Mutex::new(HashMap::new()));
+        let current_lease = Arc::new(Mutex::new(None));
 
         Ok(Self {
             identity_pk,
@@ -39,6 +43,8 @@ impl ZeroNode {
             transport,
             blob_store,
             rate_limiters,
+            lease_store,
+            current_lease,
         })
     }
 
@@ -51,6 +57,7 @@ impl ZeroNode {
         let keypair = self.keypair.clone();
         let blob_store = self.blob_store.clone();
         let rate_limiters = self.rate_limiters.clone();
+        let lease_store = self.lease_store.clone();
 
         // 1. Attempt UPnP port mapping
         let local_port = transport
@@ -89,6 +96,7 @@ impl ZeroNode {
                             &keypair,
                             &blob_store,
                             &rate_limiters,
+                            &lease_store,
                             peer_addr,
                             packet,
                         )
@@ -114,6 +122,30 @@ impl ZeroNode {
                 info!("DHT garbage collection pass complete.");
             }
         });
+
+        // 5. Build/Maintain our own LeaseSet (Automatic Gateway Selection)
+        let node_ref = Arc::new(self.clone_for_loop());
+        tokio::spawn(async move {
+            loop {
+                node_ref.publish_lease_set().await;
+                // Rotate gateways or re-publish every 10 minutes
+                tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+            }
+        });
+    }
+
+    /// Creates a shallow clone of the node for use in background loops.
+    fn clone_for_loop(&self) -> Self {
+        Self {
+            identity_pk: self.identity_pk,
+            keypair: self.keypair.clone(),
+            routing_table: self.routing_table.clone(),
+            transport: self.transport.clone(),
+            blob_store: self.blob_store.clone(),
+            rate_limiters: self.rate_limiters.clone(),
+            lease_store: self.lease_store.clone(),
+            current_lease: self.current_lease.clone(),
+        }
     }
 
     async fn process_packet(
@@ -122,6 +154,7 @@ impl ZeroNode {
         keypair: &Arc<zero_crypto::keypair::StaticKeypair>,
         blob_store: &Arc<Mutex<zero_offload::store::BlobStore>>,
         rate_limiters: &Arc<Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>>,
+        lease_store: &Arc<Mutex<HashMap<DhtPublicKey, zero_dht::node::LeaseSet>>>,
         addr: std::net::SocketAddr,
         raw_packet: &[u8],
     ) {
@@ -153,7 +186,10 @@ impl ZeroNode {
                 PacketType::Ping => {
                     info!("Received Ping from {}", addr);
                 }
-                PacketType::FindNode | PacketType::FindNodeResponse => {
+                PacketType::FindNode
+                | PacketType::FindNodeResponse
+                | PacketType::LeaseStore
+                | PacketType::LeaseResponse => {
                     if let Ok(dht_packet) = bincode::deserialize::<DhtPacket>(payload) {
                         // In a real implementation, we would decrypt `encrypted_payload` here using Noise IK.
                         // For now, we assume the payload is serialized `DhtPayload` directly inside.
@@ -202,6 +238,47 @@ impl ZeroNode {
                                         rt.insert(node);
                                     }
                                 }
+                                DhtPayload::StoreLeaseRequest { lease } => {
+                                    info!("Received StoreLeaseRequest for {:?}", lease.dht_pk);
+                                    // Verify lease expiration is in the future
+                                    let current_time = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs();
+                                    if lease.expiration > current_time {
+                                        // In a production app, we would verify the lease signature here
+                                        let mut store = lease_store.lock().await;
+                                        store.insert(lease.dht_pk, lease);
+                                    }
+                                }
+                                DhtPayload::GetLeaseRequest { target_pk } => {
+                                    let store = lease_store.lock().await;
+                                    let lease = store.get(&target_pk).cloned();
+                                    let response_payload = DhtPayload::GetLeaseResponse { lease };
+
+                                    if let Ok(response_bytes) =
+                                        bincode::serialize(&response_payload)
+                                    {
+                                        let resp_dht_packet =
+                                            DhtPacket::new(rt.local_key, response_bytes);
+                                        if let Ok(resp_bytes) = bincode::serialize(&resp_dht_packet)
+                                        {
+                                            let encoded = encode_packet(
+                                                PacketType::FindNodeResponse,
+                                                &resp_bytes,
+                                            );
+                                            let target_node = NodeInfo {
+                                                dht_pk: dht_packet.sender_pk,
+                                                addr,
+                                                last_seen: Some(std::time::Instant::now()),
+                                                reputation: 0,
+                                                consecutive_failures: 0,
+                                            };
+                                            let _ =
+                                                transport.send_packet(&target_node, &encoded).await;
+                                        }
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -231,6 +308,7 @@ impl ZeroNode {
                                         keypair,
                                         blob_store,
                                         rate_limiters,
+                                        lease_store,
                                         addr,
                                         &final_payload,
                                     ))
@@ -357,5 +435,94 @@ impl ZeroNode {
             // but for safety we use a timeout-based poll.
             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         }
+    }
+
+    /// Selects 3 gateways and publishes our LeaseSet to the network if we have enough peers.
+    pub async fn publish_lease_set(&self) {
+        info!("Attempting to publish LeaseSet...");
+
+        // 1. Select 3 highest-quality nodes as gateways
+        let gateways = {
+            let rt = self.routing_table.lock().await;
+            // For selection, we prioritize high reputation and low consecutive failures
+            let mut candidates = rt.find_closest(&self.identity_pk, 20);
+            candidates.sort_by(|a, b| b.reputation.cmp(&a.reputation));
+            candidates.into_iter().take(3).collect::<Vec<_>>()
+        };
+
+        if gateways.len() < 3 {
+            warn!(
+                "Not enough peers ({} < 3) to publish a LeaseSet",
+                gateways.len()
+            );
+            return;
+        }
+
+        let expiration = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600; // 1 hour
+
+        let lease = zero_dht::node::LeaseSet {
+            dht_pk: self.identity_pk.clone(),
+            gateways,
+            expiration,
+        };
+
+        // 2. Update local state
+        *self.current_lease.lock().await = Some(lease.clone());
+
+        // 3. Find the K nodes closest to our identity to store the LeaseSet
+        let storage_nodes = self.dht_lookup(&self.identity_pk).await;
+
+        let payload = zero_dht::packet::DhtPayload::StoreLeaseRequest { lease };
+        let payload_bytes = bincode::serialize(&payload).unwrap();
+
+        for node in storage_nodes {
+            let dht_packet =
+                zero_dht::packet::DhtPacket::new(self.identity_pk, payload_bytes.clone());
+            if let Ok(resp_bytes) = bincode::serialize(&dht_packet) {
+                let encoded = crate::packet::encode_packet(
+                    crate::packet::PacketType::LeaseStore,
+                    &resp_bytes,
+                );
+                let _ = self.transport.send_packet(&node, &encoded).await;
+            }
+        }
+
+        info!("LeaseSet successfully published to the DHT");
+    }
+
+    /// Resolves a peer's LeaseSet (entry points) from the network.
+    pub async fn find_lease(&self, target_pk: &DhtPublicKey) -> Option<zero_dht::node::LeaseSet> {
+        info!("Searching for LeaseSet for {:?}...", target_pk);
+
+        // 1. Find nodes closest to the target
+        let storage_nodes = self.dht_lookup(target_pk).await;
+
+        // 2. Query nodes for the LeaseSet
+        for node in storage_nodes {
+            let payload = zero_dht::packet::DhtPayload::GetLeaseRequest {
+                target_pk: *target_pk,
+            };
+            if let Ok(payload_bytes) = bincode::serialize(&payload) {
+                let dht_packet = zero_dht::packet::DhtPacket::new(self.identity_pk, payload_bytes);
+                if let Ok(pkt_bytes) = bincode::serialize(&dht_packet) {
+                    let encoded = crate::packet::encode_packet(
+                        crate::packet::PacketType::LeaseResponse,
+                        &pkt_bytes,
+                    );
+                    let _ = self.transport.send_packet(&node, &encoded).await;
+                }
+            }
+        }
+
+        // 3. Wait/Poll for response (In a real implementation, we'd use a dedicated response channel)
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Check if our lease_store has been populated by an incoming response
+        let store = self.lease_store.lock().await;
+        store.get(target_pk).cloned()
     }
 }

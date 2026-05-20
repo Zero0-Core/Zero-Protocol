@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DhtPublicKey(pub [u8; 32]);
@@ -11,8 +11,15 @@ pub struct NodeInfo {
     pub addr: SocketAddr,
     #[serde(skip)]
     pub last_seen: Option<Instant>,
-    pub reputation: i8,          // -128 to 127; evicted if < -10
+    pub reputation: i8, // -128 to 127; evicted if < -10
     pub consecutive_failures: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaseSet {
+    pub dht_pk: DhtPublicKey,
+    pub gateways: Vec<NodeInfo>, // 3 Entry points
+    pub expiration: u64,         // Unix timestamp
 }
 
 impl NodeInfo {

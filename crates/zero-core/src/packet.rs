@@ -17,6 +17,10 @@ pub enum PacketType {
     OffloadRetrieve = 0x07,
     /// Double-Ratchet encrypted 1-on-1 session message
     SessionMessage = 0x08,
+    /// Store a LeaseSet in the DHT
+    LeaseStore = 0x09,
+    /// Request/Response for a LeaseSet
+    LeaseResponse = 0x0A,
     /// Invalid packet identifier
     Unknown = 0xFF,
 }
@@ -32,6 +36,8 @@ impl From<u8> for PacketType {
             0x06 => PacketType::OffloadStore,
             0x07 => PacketType::OffloadRetrieve,
             0x08 => PacketType::SessionMessage,
+            0x09 => PacketType::LeaseStore,
+            0x0A => PacketType::LeaseResponse,
             _ => PacketType::Unknown,
         }
     }

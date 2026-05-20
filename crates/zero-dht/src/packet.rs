@@ -1,6 +1,6 @@
 use crate::node::{DhtPublicKey, NodeInfo};
-use serde::{Deserialize, Serialize};
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DhtPayload {
@@ -15,6 +15,15 @@ pub enum DhtPayload {
     AnnouncePeer {
         /// The one-day-rotating announce key, NOT the real identity key
         announce_key: DhtPublicKey,
+    },
+    StoreLeaseRequest {
+        lease: crate::node::LeaseSet,
+    },
+    GetLeaseRequest {
+        target_pk: DhtPublicKey,
+    },
+    GetLeaseResponse {
+        lease: Option<crate::node::LeaseSet>,
     },
 }
 
@@ -51,10 +60,10 @@ mod tests {
     fn test_packet_serialization() {
         let pk = DhtPublicKey([1u8; 32]);
         let packet = DhtPacket::new(pk, vec![1, 2, 3]);
-        
+
         let bytes = bincode::serialize(&packet).unwrap();
         let decoded: DhtPacket = bincode::deserialize(&bytes).unwrap();
-        
+
         assert_eq!(decoded.sender_pk, pk);
         assert_eq!(decoded.encrypted_payload, vec![1, 2, 3]);
     }
