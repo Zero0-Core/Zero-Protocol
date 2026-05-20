@@ -1,0 +1,17 @@
+[package]
+name = "zero-fuzz"
+version = "0.1.0"
+authors = ["Zero Protocol Team"]
+publish = false
+edition = "2021"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+zero-core = { path = "../crates/zero-core" }
+zero-crypto = { path = "../crates/zero-crypto" }
+
+[[bin]]
+name = "packet_parser"
+path = "fuzz_targets/packet_parser.rs"
+test = false
+doc = false

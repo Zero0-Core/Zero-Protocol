@@ -1,0 +1,19 @@
+[package]
+name = "zero-crypto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+x25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+blake2 = { workspace = true }
+hkdf = { workspace = true }
+argon2 = { workspace = true }
+bip39 = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+snow = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "zero-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zero-core = { path = "../zero-core" }
+zero-dht  = { path = "../zero-dht" }
+zero-crypto = { path = "../zero-crypto" }
+tokio = { workspace = true }
+uniffi = { version = "0.28", features = ["tokio"] }
+hex = "0.4"

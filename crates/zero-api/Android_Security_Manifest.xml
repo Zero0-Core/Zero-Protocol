@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 
+    CRITICAL SECURITY FIX FOR ZERO PROTOCOL ANDROID IMPLEMENTATIONS 
+    Reference: aTox Vulnerability Audit (Item #11)
+    
+    aTox originally failed to protect the local SQLite Room DB and toxcore
+    savedata from ADB backups, allowing malware or physical attackers
+    to exfiltrate the user's private key and message history.
+
+    This manifest ensures that:
+    1. Auto Backup and ADB Backup are strictly disabled (allowBackup="false")
+    2. Even if enabled via other policies, specific exclusion rules block
+       the secure storage directories.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.zeroprotocol.app">
+
+    <application
+        android:allowBackup="false"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:extractNativeLibs="false"
+        android:networkSecurityConfig="@xml/network_security_config">
+        
+        <!-- App components go here -->
+    </application>
+</manifest>

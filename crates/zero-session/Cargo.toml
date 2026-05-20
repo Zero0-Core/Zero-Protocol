@@ -1,0 +1,15 @@
+[package]
+name = "zero-session"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zero-crypto = { path = "../zero-crypto" }
+zero-net = { path = "../zero-net" }
+serde = { workspace = true }
+bincode = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+snow = { workspace = true }
+blake2 = { workspace = true }
+hkdf = { workspace = true }

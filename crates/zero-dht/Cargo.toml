@@ -1,0 +1,13 @@
+[package]
+name = "zero-dht"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zero-crypto = { path = "../zero-crypto" }
+serde = { workspace = true }
+bincode = { workspace = true }
+arrayvec = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "zero-onion"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zero-crypto = { path = "../zero-crypto" }
+zero-dht = { path = "../zero-dht" }
+serde = { workspace = true }
+bincode = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+hkdf = { workspace = true }
+blake2 = { workspace = true }
+x25519-dalek = { workspace = true }

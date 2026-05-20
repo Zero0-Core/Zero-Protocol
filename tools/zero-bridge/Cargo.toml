@@ -1,0 +1,14 @@
+[package]
+name = "zero-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+zero-core = { path = "../../crates/zero-core" }
+zero-crypto = { path = "../../crates/zero-crypto" }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+serde = { workspace = true }
+# In a real scenario, we'd add matrix-sdk = "0.7"
+# For this demonstration, we'll implement the logic structure.

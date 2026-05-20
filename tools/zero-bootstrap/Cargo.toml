@@ -1,0 +1,10 @@
+[package]
+name = "zero-bootstrap"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zero-api = { path = "../../crates/zero-api" }
+zero-crypto = { path = "../../crates/zero-crypto" }
+tokio = { workspace = true }
+tracing = { workspace = true }

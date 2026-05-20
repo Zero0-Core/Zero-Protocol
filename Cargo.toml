@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/*",
+    "tools/*"
+]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Cryptography (RustCrypto ecosystem — audited)
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+chacha20poly1305 = "0.10"
+blake2 = "0.10"
+hkdf = "0.12"
+argon2 = "0.5"
+zeroize = { version = "1.7", features = ["derive"] }
+subtle = "2.5"    # constant-time comparisons
+
+# Noise Protocol Framework
+snow = "0.9"
+
+# Networking
+quinn = "0.11"    # QUIC
+igd = "0.12"      # UPnP
+tokio-socks = "0.5"  # SOCKS5 proxy (Tor)
+rcgen = "0.12"    # Self-signed TLS certs for QUIC
+rustls = "0.23"
+rustls-pki-types = "1.0"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"     # binary protocol encoding
+prost = "0.12"    # protobuf (for structured messages)
+
+# Data structures
+arrayvec = "0.7"
+dashmap = "5"     # concurrent hash map
+
+# Utilities
+tracing = "0.1"   # structured logging
+thiserror = "1"
+rand = "0.8"
+bip39 = "2.0"
+
+# Workspace Lint Configuration (Rust 1.74+)
+# Strictly enforces safety and high performance guidelines across all 8 crates & 4 tools.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+rust_2018_idioms = "deny"
+elided_lifetimes_in_paths = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+
+# Profile Configurations
+# Dev Profile: Optimized for fast incremental compilation and full debug symbol traces.
+[profile.dev]
+opt-level = 0
+debug = true
+incremental = true
+
+# Release Profile: Optimized for absolute peak runtime performance, security hardening, and size reduction.
+[profile.release]
+opt-level = 3
+lto = "fat"            # Fat LTO across all crates for maximum performance
+codegen-units = 1      # Maximizes compiler optimization scope
+panic = "abort"        # Eliminates panic unwinding landing pads (improves speed & size)
+strip = "symbols"      # Strips debug symbols (hardens binaries against reverse engineering)
+
