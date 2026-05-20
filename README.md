@@ -1,11 +1,11 @@
 # Zero Protocol
 
-> **A production-grade, decentralized, end-to-end encrypted messaging protocol — written entirely in memory-safe Rust.**
+> **A decentralised, end-to-end encrypted messaging protocol — written entirely in memory-safe Rust.**
 
 Zero Protocol is a privacy-first, anonymous, and highly resilient communications platform. It operates without any central servers, relies on a self-healing Kademlia DHT peer network, and encrypts every message with layered cryptographic primitives including the Signal Double Ratchet, X25519 Diffie-Hellman key exchange, and a Tor-inspired 3-hop Onion Routing system.
 
 > [!TIP]
-> **New to Zero?** Read our [Decentralization Philosophy](DECENTRALIZATION.md) to understand why Zero is 100% serverless and how every user powers the network.
+> **New to Zero?** Read our [Decentralisation Philosophy](DECENTRALIZATION.md) to understand why Zero is 100% serverless and how every user powers the network.
 
 ---
 
