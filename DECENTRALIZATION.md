@@ -13,13 +13,13 @@ In traditional messaging apps (WhatsApp, Signal, Telegram), you are a **consumer
 ### 1. You are the Discovery Hub (DHT)
 Every Zero Protocol instance automatically becomes a node in a **Distributed Hash Table (DHT)**. 
 *   **What you do**: Your device maintains a 256-level routing table of other peers. 
-*   **The benefit**: When a stranger halfway across the world searches for their friend, your node might be the one to provide the "next hop" tip—without ever knowing who they are or what they are saying. 
+*   **The benefit**: When a stranger halfway across the world searches for their friend, your node might be the one to provide a **LeaseSet** (a list of encrypted entry points) — without ever revealing that friend's actual IP address.
 *   **Self-Healing**: If 10,000 nodes go offline, the DHT automatically redistributes the load across the remaining nodes. The network cannot be "shut down" without blocking every user's IP address.
 
 ### 2. You are the Privacy Shield (Onion Routing)
-Zero Protocol uses 3-hop **Onion Routing** for anonymous peer discovery.
+Zero Protocol uses **Unidirectional Onion Routing** (I2P-inspired) for anonymous peer discovery.
 *   **What you do**: Your device acts as a random relay hop for other users.
-*   **Layered Security**: You might receive an encrypted packet, peel off one layer of encryption to see the *next* hop's address, and forward it. 
+*   **Asymmetric Paths**: Outbound and Inbound traffic take completely different 3-hop routes to prevent timing correlation.
 *   **Total Blindness**: As a relay, you never know the original sender, the ultimate destination, or the contents of the message. You provide privacy for others, and they provide it for you.
 
 ### 3. You are the Offline Vault (Store-and-Forward)

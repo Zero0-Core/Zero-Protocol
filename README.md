@@ -35,7 +35,7 @@ zero-protocol/
 │   ├── zero-dht/               # Kademlia DHT — routing table, packet codec, bucket logic
 │   ├── zero-session/           # Double Ratchet sessions, file transfer, group chat
 │   ├── zero-net/               # Network layer — UDP, QUIC, UPnP, LAN multicast discovery
-│   ├── zero-onion/             # 3-hop Onion Routing — path selection, wrapping, peeling
+│   ├── zero-onion/             # Unidirectional Garlic/Onion Routing — paths, constant-size padding
 │   ├── zero-offload/           # Store-and-forward offline blob storage (PoW-gated)
 │   ├── zero-core/              # Orchestration — ZeroNode event loop, packet multiplexer
 │   └── zero-api/               # UniFFI API boundary for Android / iOS native frontends
@@ -96,7 +96,8 @@ Implements a hardened XOR-metric Kademlia DHT for decentralized peer discovery a
 |---|---|
 | `node` | `DhtPublicKey`, `NodeInfo` (identity, address, reputation, failures) |
 | `routing` | `RoutingTable` — K-bucket management with bucket-splitting and LRU eviction |
-| `packet` | `DhtPacket` / `DhtPayload` — binary-encoded FindNode / FindNodeResponse |
+| `node` | `LeaseSet` / `Gateways` — support for anonymous peer entry points |
+| `packet` | `DhtPacket` / `DhtPayload` — binary-encoded LeaseStore / LeaseRetrieve |
 | `lookup` | Iterative α-parallel Kademlia node lookup algorithm |
 
 **Key design decisions:**
@@ -138,21 +139,21 @@ Abstracts all I/O primitives behind a unified interface.
 
 ---
 
-### `zero-onion` — Onion Routing
+### `zero-onion` — Hardened Hybrid Routing
 
-A Tor-inspired 3-hop onion routing layer that hides both sender identity and message contents.
+An I2P-inspired unidirectional onion/garlic routing layer that hides both sender identity and message patterns.
 
 | Module | Purpose |
 |---|---|
-| `packet` | `OnionPacket`, `OnionCommand` (Forward / Deliver) — the wire format |
-| `path` | `OnionPath` — selects 3 random relay nodes from the routing table |
+| `packet` | `OnionPacket`, `OnionCommand` — wire format with **constant-size padding** |
+| `path` | `OnionTunnel` — selects 3 random relay nodes for **unidirectional paths** |
 | `forward` | `peel_and_forward` — strips one AEAD layer and returns the next routing command |
 | `announce` | Announce key construction for offline rendezvous |
 
 **How it works:**
-1. The sender wraps the payload in 3 nested AEAD layers (innermost = destination).
-2. Each hop decrypts exactly one layer, revealing only the *next hop* address.
-3. No single relay ever knows both the origin and the destination.
+1. **Unidirectional Tunnels**: Outbound and Inbound traffic take completely different 3-hop paths, frustrating timing analysis.
+2. **Constant-Size Padding**: Every packet is padded with random "chaff" to exactly 2048 bytes, making all messages look identical.
+3. **LeaseSets**: Nodes announce "Entry Gateways" to the DHT instead of their actual IP addresses.
 4. Each layer uses an ephemeral X25519 ECDH key so sessions are unlinkable.
 
 ---
@@ -211,7 +212,7 @@ Generated via Mozilla UniFFI, the bindings allow Swift (iOS) and Kotlin (Android
 | **Passive eavesdropping** | All messages are end-to-end encrypted with ChaCha20-Poly1305 (AEAD). |
 | **Man-in-the-middle** | Noise IK handshake authenticates both parties with their long-term static keys. |
 | **Forward secrecy violation** | Signal Double Ratchet rotates keys per-message; compromising one key never reveals past messages. |
-| **Traffic analysis / de-anonymization** | 3-hop Onion Routing with per-session ephemeral keys makes origin/destination unlinkable. |
+| **Traffic analysis / de-anonymization** | **Unidirectional Onion Routing** with **2048-byte constant padding** and LeaseSet entry points. |
 | **Offline message spam** | Blake2s Proof-of-Work is required to store any blob at a relay node. |
 | **Memory disclosure** | All cryptographic key material implements `zeroize`; memory is wiped immediately after use. |
 | **Binary reverse engineering** | Release builds strip all debug symbols (`strip = "symbols"`) and abort on panic (no unwinding frames). |

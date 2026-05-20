@@ -5,10 +5,10 @@ Zero Protocol is designed from the ground up to be a resilient, anonymous, and p
 ## 1. Core Security Guarantees
 
 *   **End-to-End Encryption (E2EE)**: Every session message is encrypted using the Signal Double Ratchet algorithm, ensuring both forward secrecy and post-compromise recovery.
-*   **Anonymity via Onion Routing**: 3-hop ephemeral circuits obscure the source and destination of discovery requests. Relay nodes only see the immediate previous and next hop.
+*   **Anonymity via Unidirectional Onion Routing**: Separate outbound/inbound ephemeral circuits (3 hops each) obscure the source and destination.
 *   **Metadata Resistance**: 
-    *   IP addresses are hidden from peers in `OnionRelayed` mode.
-    *   Packet sizes are obscured using 64-byte boundary random padding.
+    *   IP addresses are hidden behind **LeaseSet Gateways**.
+    *   Packet sizes are perfectly obscured using **2048-byte constant-size padding** (Chaff).
 *   **Zero-Knowledge Storage**: Offline message blobs are encrypted with the recipient's public key; storage nodes cannot see the content, sender, or recipient identity.
 *   **Decentralized Trust**: No central authority or bootstrap servers hold any user data or keys.
 
@@ -28,7 +28,7 @@ We assume an adversary may:
 
 | Threat | Mitigation | Implementation Status |
 |---|---|---|
-| **Traffic Analysis** | 3-hop Onion Routing + 64-byte boundary padding to hide packet sizes and routes. | ✅ Implemented |
+| **Traffic Analysis** | Unidirectional Onion Routing + 2048-byte constant-size padding. | ✅ Implemented |
 | **Sybil Attack** | Anti-Sybil subnet diversity rules (max 2 nodes per /24 subnet per k-bucket). | ✅ Implemented |
 | **Key Compromise** | Double Ratchet rotates symmetric keys per message; local storage encrypted via Argon2id. | ✅ Implemented |
 | **Denial of Service** | Per-IP token-bucket rate limiting (100 packets/sec) on all entry points. | ✅ Implemented |
@@ -50,7 +50,7 @@ We assume an adversary may:
 
 While Zero Protocol is "Hardened," the following areas are identified for future security research:
 
-1.  **Global Passive Adversary**: A sophisticated adversary observing the *entire* internet could still perform timing analysis to correlate entry and exit traffic on the onion network.
+1.  **Global Passive Adversary**: A sophisticated adversary observing the *entire* internet is forced into high-cost statistical analysis, as unidirectional paths and constant padding eliminate simple timing/size correlation.
 2.  **Quantum Resistance**: Current primitives (X25519, Ed25519) are not quantum-resistant. Future versions will explore Kyber/Dilithium hybrid handshakes.
 3.  **Bootstrap Centralization**: Initial bootstrap relies on a hardcoded list of nodes. While distributed, this remains a potential target for blocking. DNS-over-HTTPS (DoH) bootstrap is under evaluation.
 4.  **Traffic Correlation**: Very long sessions between the same two IPs (in `Direct` mode) may allow an observer to infer a social relationship even if content is hidden.
