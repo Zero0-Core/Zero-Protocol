@@ -21,6 +21,9 @@ pub struct OfflineBlob {
     /// Sender's public identity key (needed for signature verification).
     pub sender_pk: IdentityPublicKey,
 
+    /// Sender's DHT identity key (X25519 public key).
+    pub sender_dht_pk: IdentityPublicKey,
+
     /// Unix timestamp. Nodes MUST drop blobs older than 7 days.
     pub expires_at: u64,
 
@@ -40,6 +43,7 @@ impl OfflineBlob {
         let mut context = Vec::new();
         context.extend_from_slice(&self.sender_pk.0);
         context.extend_from_slice(&self.expires_at.to_le_bytes());
+        context.extend_from_slice(&self.ciphertext);
 
         zero_crypto::pow::verify_pow(&context, self.pow_nonce, &self.pow_token, 18)
             .map_err(|_| crate::OffloadError::InvalidPow)?;
@@ -48,6 +52,11 @@ impl OfflineBlob {
         let verify_key = ed25519_dalek::VerifyingKey::from_bytes(&self.sender_pk.0)
             .map_err(|_| crate::OffloadError::InvalidSignature)?;
             
+        // Mathematically verify that the Ed25519 public key converts to the sender_dht_pk X25519 key!
+        if verify_key.to_montgomery().to_bytes() != self.sender_dht_pk.0 {
+            return Err(crate::OffloadError::InvalidSignature);
+        }
+
         let mut msg = Vec::new();
         msg.extend_from_slice(&self.nonce);
         msg.extend_from_slice(&self.ciphertext);

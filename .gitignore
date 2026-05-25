@@ -3,3 +3,5 @@
 Cargo.lock
 .env
 .DS_Store
+test_output.txt
+tests_list.txt

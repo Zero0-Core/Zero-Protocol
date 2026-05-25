@@ -6,6 +6,13 @@ use zero_dht::node::DhtPublicKey;
 use zero_dht::routing::RoutingTable;
 use zero_net::transport::TransportSelector;
 use zero_net::udp::UdpManager;
+use snow::HandshakeState;
+use zero_dht::packet::DhtPayload;
+
+pub struct PendingQuery {
+    pub handshake: HandshakeState,
+    pub sender: tokio::sync::oneshot::Sender<DhtPayload>,
+}
 
 /// The central orchestration node that ties all Zero Protocol subsystems together.
 pub struct ZeroNode {
@@ -14,9 +21,10 @@ pub struct ZeroNode {
     pub routing_table: Arc<Mutex<RoutingTable>>,
     pub transport: Arc<TransportSelector>,
     pub blob_store: Arc<Mutex<zero_offload::store::BlobStore>>,
-    pub rate_limiters: Arc<Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>>,
+    pub rate_limiters: Arc<Mutex<HashMap<std::net::IpAddr, (f64, std::time::Instant)>>>,
     pub lease_store: Arc<Mutex<HashMap<DhtPublicKey, zero_dht::node::LeaseSet>>>,
     pub current_lease: Arc<Mutex<Option<zero_dht::node::LeaseSet>>>,
+    pub pending_dht_queries: Arc<Mutex<HashMap<[u8; 8], PendingQuery>>>,
 }
 
 impl ZeroNode {
@@ -25,7 +33,16 @@ impl ZeroNode {
         keypair: zero_crypto::keypair::StaticKeypair,
     ) -> Result<Self, crate::CoreError> {
         let udp_manager = UdpManager::bind(bind_addr).await?;
-        let transport = Arc::new(TransportSelector::new(Arc::new(udp_manager)));
+        
+        let quic_addr = std::net::SocketAddr::new(bind_addr.ip(), 0);
+        let quic_manager = zero_net::quic::QuicManager::new(quic_addr).ok().map(Arc::new);
+        let tcp_relay_manager = Some(Arc::new(zero_net::tcp::TcpRelayManager::new()));
+
+        let transport = Arc::new(TransportSelector::new(
+            Arc::new(udp_manager),
+            quic_manager,
+            tcp_relay_manager,
+        ));
 
         let identity_pk = DhtPublicKey(keypair.public);
         let routing_table = Arc::new(Mutex::new(RoutingTable::new(identity_pk.clone())));
@@ -35,6 +52,7 @@ impl ZeroNode {
         let rate_limiters = Arc::new(Mutex::new(HashMap::new()));
         let lease_store = Arc::new(Mutex::new(HashMap::new()));
         let current_lease = Arc::new(Mutex::new(None));
+        let pending_dht_queries = Arc::new(Mutex::new(HashMap::new()));
 
         Ok(Self {
             identity_pk,
@@ -45,6 +63,7 @@ impl ZeroNode {
             rate_limiters,
             lease_store,
             current_lease,
+            pending_dht_queries,
         })
     }
 
@@ -58,6 +77,7 @@ impl ZeroNode {
         let blob_store = self.blob_store.clone();
         let rate_limiters = self.rate_limiters.clone();
         let lease_store = self.lease_store.clone();
+        let pending_dht_queries = self.pending_dht_queries.clone();
 
         // 1. Attempt UPnP port mapping
         let local_port = transport
@@ -76,14 +96,15 @@ impl ZeroNode {
 
         // 2. Start LAN discovery loop
         let socket = transport.udp.socket();
-        let local_pk = self.identity_pk.clone();
+        let kp = self.keypair.clone();
         tokio::spawn(async move {
-            zero_net::lan::lan_discovery_loop(&socket, &local_pk).await;
+            zero_net::lan::lan_discovery_loop(&socket, &kp).await;
         });
 
         // 3. The core packet ingestion loop
         tokio::spawn(async move {
             let mut buf = vec![0u8; 65535];
+            let pending_dht_queries_clone = pending_dht_queries.clone();
 
             loop {
                 // Wait for an incoming UDP packet via the public socket() accessor
@@ -97,6 +118,7 @@ impl ZeroNode {
                             &blob_store,
                             &rate_limiters,
                             &lease_store,
+                            &pending_dht_queries_clone,
                             peer_addr,
                             packet,
                         )
@@ -116,7 +138,7 @@ impl ZeroNode {
                 tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
                 let current_time = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_default()
                     .as_secs();
                 gc_store.lock().await.cleanup_expired(current_time);
                 info!("DHT garbage collection pass complete.");
@@ -145,6 +167,7 @@ impl ZeroNode {
             rate_limiters: self.rate_limiters.clone(),
             lease_store: self.lease_store.clone(),
             current_lease: self.current_lease.clone(),
+            pending_dht_queries: self.pending_dht_queries.clone(),
         }
     }
 
@@ -153,8 +176,9 @@ impl ZeroNode {
         transport: &Arc<TransportSelector>,
         keypair: &Arc<zero_crypto::keypair::StaticKeypair>,
         blob_store: &Arc<Mutex<zero_offload::store::BlobStore>>,
-        rate_limiters: &Arc<Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>>,
+        rate_limiters: &Arc<Mutex<HashMap<std::net::IpAddr, (f64, std::time::Instant)>>>,
         lease_store: &Arc<Mutex<HashMap<DhtPublicKey, zero_dht::node::LeaseSet>>>,
+        pending_dht_queries: &Arc<Mutex<HashMap<[u8; 8], PendingQuery>>>,
         addr: std::net::SocketAddr,
         raw_packet: &[u8],
     ) {
@@ -162,20 +186,19 @@ impl ZeroNode {
         use zero_dht::node::NodeInfo;
         use zero_dht::packet::{DhtPacket, DhtPayload};
 
-        // 0. Rate limiting check
+        // 0. Rate limiting check using sliding Token Bucket algorithm (100.0 max capacity, 100.0 tokens/second refill)
         {
             let mut limiters = rate_limiters.lock().await;
             let now = std::time::Instant::now();
-            let entry = limiters.entry(addr.ip()).or_insert((0, now));
+            let entry = limiters.entry(addr.ip()).or_insert((100.0, now));
 
-            if now.duration_since(entry.1).as_secs() >= 1 {
-                entry.0 = 0;
-                entry.1 = now;
-            }
+            let elapsed = now.duration_since(entry.1).as_secs_f64();
+            entry.0 = (entry.0 + elapsed * 100.0).min(100.0);
+            entry.1 = now;
 
-            entry.0 += 1;
-            if entry.0 > 100 {
-                // Max 100 packets per second per IP
+            if entry.0 >= 1.0 {
+                entry.0 -= 1.0;
+            } else {
                 warn!("Rate limit exceeded for {}", addr.ip());
                 return;
             }
@@ -191,95 +214,106 @@ impl ZeroNode {
                 | PacketType::LeaseStore
                 | PacketType::LeaseResponse => {
                     if let Ok(dht_packet) = bincode::deserialize::<DhtPacket>(payload) {
-                        // In a real implementation, we would decrypt `encrypted_payload` here using Noise IK.
-                        // For now, we assume the payload is serialized `DhtPayload` directly inside.
-                        if let Ok(dht_payload) =
-                            bincode::deserialize::<DhtPayload>(&dht_packet.encrypted_payload)
-                        {
-                            // Always insert the sender into our routing table (passive learning)
-                            let new_node = NodeInfo {
-                                dht_pk: dht_packet.sender_pk,
-                                addr,
-                                last_seen: Some(std::time::Instant::now()),
-                                reputation: 0,
-                                consecutive_failures: 0,
-                            };
-
-                            let mut rt = routing_table.lock().await;
-                            rt.insert(new_node);
-
-                            match dht_payload {
-                                DhtPayload::FindNodeRequest { target_pk } => {
-                                    // Respond with the K closest nodes we know
-                                    let closest = rt.find_closest(&target_pk, zero_dht::routing::K);
-                                    let response_payload =
-                                        DhtPayload::FindNodeResponse { nodes: closest };
-                                    let response_bytes =
-                                        bincode::serialize(&response_payload).unwrap();
-
-                                    let resp_dht_packet =
-                                        DhtPacket::new(rt.local_key, response_bytes);
-                                    let resp_bytes = bincode::serialize(&resp_dht_packet).unwrap();
-                                    let encoded =
-                                        encode_packet(PacketType::FindNodeResponse, &resp_bytes);
-
-                                    let target_node = NodeInfo {
+                        // Check if we have a pending oneshot correlation for this request ID
+                        let mut pending = pending_dht_queries.lock().await;
+                        if let Some(pending_query) = pending.remove(&dht_packet.request_id) {
+                            let mut read_buf = vec![0u8; dht_packet.encrypted_payload.len()];
+                            let mut hs = pending_query.handshake;
+                            if let Ok(len) = hs.read_message(&dht_packet.encrypted_payload, &mut read_buf) {
+                                if let Ok(dht_payload) = bincode::deserialize::<DhtPayload>(&read_buf[..len]) {
+                                    // Passive learning
+                                    let new_node = NodeInfo {
                                         dht_pk: dht_packet.sender_pk,
                                         addr,
                                         last_seen: Some(std::time::Instant::now()),
                                         reputation: 0,
                                         consecutive_failures: 0,
                                     };
-                                    let _ = transport.send_packet(&target_node, &encoded).await;
-                                }
-                                DhtPayload::FindNodeResponse { nodes } => {
-                                    // We got nodes! Insert them into our routing table so our loop can find them.
-                                    for node in nodes {
-                                        rt.insert(node);
-                                    }
-                                }
-                                DhtPayload::StoreLeaseRequest { lease } => {
-                                    info!("Received StoreLeaseRequest for {:?}", lease.dht_pk);
-                                    // Verify lease expiration is in the future
-                                    let current_time = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs();
-                                    if lease.expiration > current_time {
-                                        // In a production app, we would verify the lease signature here
-                                        let mut store = lease_store.lock().await;
-                                        store.insert(lease.dht_pk, lease);
-                                    }
-                                }
-                                DhtPayload::GetLeaseRequest { target_pk } => {
-                                    let store = lease_store.lock().await;
-                                    let lease = store.get(&target_pk).cloned();
-                                    let response_payload = DhtPayload::GetLeaseResponse { lease };
+                                    routing_table.lock().await.insert(new_node);
 
-                                    if let Ok(response_bytes) =
-                                        bincode::serialize(&response_payload)
-                                    {
-                                        let resp_dht_packet =
-                                            DhtPacket::new(rt.local_key, response_bytes);
-                                        if let Ok(resp_bytes) = bincode::serialize(&resp_dht_packet)
-                                        {
-                                            let encoded = encode_packet(
-                                                PacketType::FindNodeResponse,
-                                                &resp_bytes,
-                                            );
-                                            let target_node = NodeInfo {
-                                                dht_pk: dht_packet.sender_pk,
-                                                addr,
-                                                last_seen: Some(std::time::Instant::now()),
-                                                reputation: 0,
-                                                consecutive_failures: 0,
-                                            };
-                                            let _ =
-                                                transport.send_packet(&target_node, &encoded).await;
+                                    let _ = pending_query.sender.send(dht_payload);
+                                }
+                            }
+                        } else if let Ok(mut hs) = zero_crypto::noise::build_responder(keypair) {
+                            let mut read_buf = vec![0u8; dht_packet.encrypted_payload.len()];
+                            if let Ok(len) = hs.read_message(&dht_packet.encrypted_payload, &mut read_buf) {
+                                if let Ok(dht_payload) = bincode::deserialize::<DhtPayload>(&read_buf[..len]) {
+                                    let new_node = NodeInfo {
+                                        dht_pk: dht_packet.sender_pk,
+                                        addr,
+                                        last_seen: Some(std::time::Instant::now()),
+                                        reputation: 0,
+                                        consecutive_failures: 0,
+                                    };
+                                    let local_key = {
+                                        let mut rt = routing_table.lock().await;
+                                        rt.insert(new_node);
+                                        rt.local_key
+                                    };
+
+                                    match dht_payload {
+                                        DhtPayload::FindNodeRequest { target_pk } => {
+                                            let closest = routing_table.lock().await.find_closest(&target_pk, zero_dht::routing::K);
+                                            let response_payload = DhtPayload::FindNodeResponse { nodes: closest };
+                                            if let Ok(response_payload_bytes) = bincode::serialize(&response_payload) {
+                                                let mut write_buf = vec![0u8; response_payload_bytes.len() + 128];
+                                                if let Ok(resp_len) = hs.write_message(&response_payload_bytes, &mut write_buf) {
+                                                    let encrypted_payload = write_buf[..resp_len].to_vec();
+                                                    let mut resp_dht_packet = DhtPacket::new(local_key, encrypted_payload);
+                                                    resp_dht_packet.request_id = dht_packet.request_id;
+
+                                                    if let Ok(resp_bytes) = bincode::serialize(&resp_dht_packet) {
+                                                        let encoded = encode_packet(PacketType::FindNodeResponse, &resp_bytes);
+                                                        let target_node = NodeInfo {
+                                                            dht_pk: dht_packet.sender_pk,
+                                                            addr,
+                                                            last_seen: Some(std::time::Instant::now()),
+                                                            reputation: 0,
+                                                            consecutive_failures: 0,
+                                                        };
+                                                        let _ = transport.send_packet(&target_node, &encoded).await;
+                                                    }
+                                                }
+                                            }
                                         }
+                                        DhtPayload::StoreLeaseRequest { lease } => {
+                                            let current_time = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_secs();
+                                            if lease.expiration > current_time {
+                                                let mut store = lease_store.lock().await;
+                                                store.insert(lease.dht_pk, lease);
+                                            }
+                                        }
+                                        DhtPayload::GetLeaseRequest { target_pk } => {
+                                            let store = lease_store.lock().await;
+                                            let lease = store.get(&target_pk).cloned();
+                                            let response_payload = DhtPayload::GetLeaseResponse { lease };
+                                            if let Ok(response_payload_bytes) = bincode::serialize(&response_payload) {
+                                                let mut write_buf = vec![0u8; response_payload_bytes.len() + 128];
+                                                if let Ok(resp_len) = hs.write_message(&response_payload_bytes, &mut write_buf) {
+                                                    let encrypted_payload = write_buf[..resp_len].to_vec();
+                                                    let mut resp_dht_packet = DhtPacket::new(local_key, encrypted_payload);
+                                                    resp_dht_packet.request_id = dht_packet.request_id;
+
+                                                    if let Ok(resp_bytes) = bincode::serialize(&resp_dht_packet) {
+                                                        let encoded = encode_packet(PacketType::LeaseResponse, &resp_bytes);
+                                                        let target_node = NodeInfo {
+                                                            dht_pk: dht_packet.sender_pk,
+                                                            addr,
+                                                            last_seen: Some(std::time::Instant::now()),
+                                                            reputation: 0,
+                                                            consecutive_failures: 0,
+                                                        };
+                                                        let _ = transport.send_packet(&target_node, &encoded).await;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
-                                _ => {}
                             }
                         }
                     }
@@ -292,7 +326,13 @@ impl ZeroNode {
                         match zero_onion::forward::peel_and_forward(&onion_packet, keypair) {
                             Ok(onion_command) => match onion_command {
                                 zero_onion::packet::OnionCommand::Forward { next_hop, packet } => {
-                                    if let Ok(serialized_packet) = bincode::serialize(&packet) {
+                                    if let Ok(mut serialized_packet) = bincode::serialize(&packet) {
+                                        if serialized_packet.len() < zero_onion::packet::CONSTANT_PACKET_SIZE {
+                                            let padding_len = zero_onion::packet::CONSTANT_PACKET_SIZE - serialized_packet.len();
+                                            let mut padding = vec![0u8; padding_len];
+                                            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut padding);
+                                            serialized_packet.extend_from_slice(&padding);
+                                        }
                                         let encoded = encode_packet(
                                             PacketType::OnionRequest,
                                             &serialized_packet,
@@ -309,6 +349,7 @@ impl ZeroNode {
                                         blob_store,
                                         rate_limiters,
                                         lease_store,
+                                        pending_dht_queries,
                                         addr,
                                         &final_payload,
                                     ))
@@ -335,7 +376,7 @@ impl ZeroNode {
                     {
                         let current_time = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
+                            .unwrap_or_default()
                             .as_secs();
                         if let Err(e) = blob_store.lock().await.store_blob(
                             target_announce_key,
@@ -409,6 +450,8 @@ impl ZeroNode {
                 return closest;
             }
 
+            let mut futures = Vec::new();
+
             // 3. Send FindNode requests concurrently
             for node in to_query {
                 queried.insert(node.dht_pk);
@@ -418,22 +461,48 @@ impl ZeroNode {
                 let payload = zero_dht::packet::DhtPayload::FindNodeRequest {
                     target_pk: *target_pk,
                 };
-                let payload_bytes = bincode::serialize(&payload).unwrap();
-                let dht_packet = zero_dht::packet::DhtPacket::new(local_key, payload_bytes);
-                let packet_bytes = bincode::serialize(&dht_packet).unwrap();
+                if let Ok(mut hs) = zero_crypto::noise::build_initiator(&self.keypair, &node.dht_pk.0) {
+                    if let Ok(payload_bytes) = bincode::serialize(&payload) {
+                        let mut write_buf = vec![0u8; payload_bytes.len() + 128];
+                        if let Ok(len) = hs.write_message(&payload_bytes, &mut write_buf) {
+                            let encrypted_payload = write_buf[..len].to_vec();
+                            let dht_packet = zero_dht::packet::DhtPacket::new(local_key, encrypted_payload);
+                            let request_id = dht_packet.request_id;
 
-                let encoded = crate::packet::encode_packet(
-                    crate::packet::PacketType::FindNode,
-                    &packet_bytes,
-                );
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            self.pending_dht_queries.lock().await.insert(request_id, PendingQuery {
+                                handshake: hs,
+                                sender: tx,
+                            });
 
-                let _ = self.transport.send_packet(&node, &encoded).await;
+                            if let Ok(packet_bytes) = bincode::serialize(&dht_packet) {
+                                let encoded = crate::packet::encode_packet(
+                                    crate::packet::PacketType::FindNode,
+                                    &packet_bytes,
+                                );
+                                let transport = self.transport.clone();
+                                let node_clone = node.clone();
+                                let pending_dht_queries = self.pending_dht_queries.clone();
+
+                                futures.push(tokio::spawn(async move {
+                                    let _ = transport.send_packet(&node_clone, &encoded).await;
+                                    let res = tokio::time::timeout(
+                                        tokio::time::Duration::from_millis(500),
+                                        rx
+                                    ).await;
+                                    if res.is_err() {
+                                        pending_dht_queries.lock().await.remove(&request_id);
+                                    }
+                                }));
+                            }
+                        }
+                    }
+                }
             }
 
-            // 4. Wait for responses to populate the routing table before next iteration
-            // In a production implementation, this would wait on a condition variable or response channels,
-            // but for safety we use a timeout-based poll.
-            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+            for f in futures {
+                let _ = f.await;
+            }
         }
     }
 
@@ -460,7 +529,7 @@ impl ZeroNode {
 
         let expiration = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs()
             + 3600; // 1 hour
 
@@ -477,17 +546,23 @@ impl ZeroNode {
         let storage_nodes = self.dht_lookup(&self.identity_pk).await;
 
         let payload = zero_dht::packet::DhtPayload::StoreLeaseRequest { lease };
-        let payload_bytes = bincode::serialize(&payload).unwrap();
-
-        for node in storage_nodes {
-            let dht_packet =
-                zero_dht::packet::DhtPacket::new(self.identity_pk, payload_bytes.clone());
-            if let Ok(resp_bytes) = bincode::serialize(&dht_packet) {
-                let encoded = crate::packet::encode_packet(
-                    crate::packet::PacketType::LeaseStore,
-                    &resp_bytes,
-                );
-                let _ = self.transport.send_packet(&node, &encoded).await;
+        if let Ok(payload_bytes) = bincode::serialize(&payload) {
+            for node in storage_nodes {
+                if let Ok(mut hs) = zero_crypto::noise::build_initiator(&self.keypair, &node.dht_pk.0) {
+                    let mut write_buf = vec![0u8; payload_bytes.len() + 128];
+                    if let Ok(len) = hs.write_message(&payload_bytes, &mut write_buf) {
+                        let encrypted_payload = write_buf[..len].to_vec();
+                        let dht_packet =
+                            zero_dht::packet::DhtPacket::new(self.identity_pk, encrypted_payload);
+                        if let Ok(resp_bytes) = bincode::serialize(&dht_packet) {
+                            let encoded = crate::packet::encode_packet(
+                                crate::packet::PacketType::LeaseStore,
+                                &resp_bytes,
+                            );
+                            let _ = self.transport.send_packet(&node, &encoded).await;
+                        }
+                    }
+                }
             }
         }
 
@@ -501,28 +576,67 @@ impl ZeroNode {
         // 1. Find nodes closest to the target
         let storage_nodes = self.dht_lookup(target_pk).await;
 
-        // 2. Query nodes for the LeaseSet
+        // 2. Query nodes for the LeaseSet concurrently and wait for the first response
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
         for node in storage_nodes {
             let payload = zero_dht::packet::DhtPayload::GetLeaseRequest {
                 target_pk: *target_pk,
             };
-            if let Ok(payload_bytes) = bincode::serialize(&payload) {
-                let dht_packet = zero_dht::packet::DhtPacket::new(self.identity_pk, payload_bytes);
-                if let Ok(pkt_bytes) = bincode::serialize(&dht_packet) {
-                    let encoded = crate::packet::encode_packet(
-                        crate::packet::PacketType::LeaseResponse,
-                        &pkt_bytes,
-                    );
-                    let _ = self.transport.send_packet(&node, &encoded).await;
+            if let Ok(mut hs) = zero_crypto::noise::build_initiator(&self.keypair, &node.dht_pk.0) {
+                if let Ok(payload_bytes) = bincode::serialize(&payload) {
+                    let mut write_buf = vec![0u8; payload_bytes.len() + 128];
+                    if let Ok(len) = hs.write_message(&payload_bytes, &mut write_buf) {
+                        let encrypted_payload = write_buf[..len].to_vec();
+                        let dht_packet = zero_dht::packet::DhtPacket::new(self.identity_pk, encrypted_payload);
+                        let request_id = dht_packet.request_id;
+
+                        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                        self.pending_dht_queries.lock().await.insert(request_id, PendingQuery {
+                            handshake: hs,
+                            sender: oneshot_tx,
+                        });
+
+                        if let Ok(pkt_bytes) = bincode::serialize(&dht_packet) {
+                            let encoded = crate::packet::encode_packet(
+                                crate::packet::PacketType::LeaseResponse,
+                                &pkt_bytes,
+                            );
+                            let transport = self.transport.clone();
+                            let node_clone = node.clone();
+                            let tx_clone = tx.clone();
+                            let pending_dht_queries = self.pending_dht_queries.clone();
+
+                            tokio::spawn(async move {
+                                let _ = transport.send_packet(&node_clone, &encoded).await;
+                                let res = tokio::time::timeout(
+                                    tokio::time::Duration::from_millis(500),
+                                    oneshot_rx
+                                ).await;
+                                if let Ok(Ok(DhtPayload::GetLeaseResponse { lease: Some(lease) })) = res {
+                                    let _ = tx_clone.send(lease).await;
+                                } else {
+                                    pending_dht_queries.lock().await.remove(&request_id);
+                                }
+                            });
+                        }
+                    }
                 }
             }
         }
 
-        // 3. Wait/Poll for response (In a real implementation, we'd use a dedicated response channel)
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        // Drop the master sender so receiver gets None if no task succeeded/sent anything
+        drop(tx);
 
-        // Check if our lease_store has been populated by an incoming response
-        let store = self.lease_store.lock().await;
-        store.get(target_pk).cloned()
+        if let Some(lease) = rx.recv().await {
+            // Check if our lease_store is updated
+            let mut store = self.lease_store.lock().await;
+            store.insert(*target_pk, lease.clone());
+            Some(lease)
+        } else {
+            // Check if our lease_store has been populated by some other route
+            let store = self.lease_store.lock().await;
+            store.get(target_pk).cloned()
+        }
     }
 }

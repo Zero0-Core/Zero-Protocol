@@ -1,5 +1,5 @@
 use std::time::Instant;
-use zero_crypto::keypair::StaticKeypair;
+use zero_crypto::keypair::EphemeralKeypair;
 use zero_dht::node::NodeInfo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,9 +15,9 @@ pub struct OnionTunnel {
     pub hop2: NodeInfo,
     pub hop3: NodeInfo,
     /// Our ephemeral keys used to encrypt for each specific hop
-    pub hop1_key: StaticKeypair,
-    pub hop2_key: StaticKeypair,
-    pub hop3_key: StaticKeypair,
+    pub hop1_key: EphemeralKeypair,
+    pub hop2_key: EphemeralKeypair,
+    pub hop3_key: EphemeralKeypair,
     pub created_at: Instant,
 }
 
@@ -30,9 +30,9 @@ impl OnionTunnel {
             hop1,
             hop2,
             hop3,
-            hop1_key: StaticKeypair::generate(),
-            hop2_key: StaticKeypair::generate(),
-            hop3_key: StaticKeypair::generate(),
+            hop1_key: EphemeralKeypair::generate(),
+            hop2_key: EphemeralKeypair::generate(),
+            hop3_key: EphemeralKeypair::generate(),
             created_at: Instant::now(),
         }
     }

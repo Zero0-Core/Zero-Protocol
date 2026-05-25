@@ -88,7 +88,7 @@ pub fn wrap_onion(payload: &[u8], tunnel: &OnionTunnel) -> Result<Vec<u8>, Onion
 }
 
 fn derive_onion_key(
-    local_ephemeral: &zero_crypto::keypair::StaticKeypair,
+    local_ephemeral: &zero_crypto::keypair::EphemeralKeypair,
     remote_pk: &DhtPublicKey,
 ) -> ([u8; 32], [u8; 12]) {
     let mut secret_bytes = [0u8; 32];

@@ -56,7 +56,7 @@ impl SaveData {
 
         cipher
             .decrypt(&n, self.ciphertext.as_ref())
-            .map_err(|_| ZeroError::StorageError)
+            .map_err(|_| ZeroError::DecryptionError)
     }
 }
 

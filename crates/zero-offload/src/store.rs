@@ -96,6 +96,7 @@ mod tests {
             ciphertext: vec![0xABu8; 64],
             sender_sig: vec![0u8; 64],
             sender_pk: IdentityPublicKey([sender_seed; 32]),
+            sender_dht_pk: IdentityPublicKey([sender_seed; 32]),
             expires_at,
             pow_token: [0u8; 32],
             pow_nonce: 0,

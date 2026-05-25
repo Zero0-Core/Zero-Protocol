@@ -31,10 +31,11 @@ impl OffloadClient {
         let ciphertext = aead::encrypt(&key, &nonce, plaintext, &[])?;
 
         // Generate Ed25519 keys from the same seed
-        let priv_bytes: &[u8; 32] = &*sender_identity.private;
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(priv_bytes);
+        let seed_bytes: &[u8; 32] = sender_identity.seed.as_ref();
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(seed_bytes);
         let verify_key = signing_key.verifying_key();
         let sender_pk = IdentityPublicKey(verify_key.to_bytes());
+        let sender_dht_pk = IdentityPublicKey(sender_identity.public);
 
         let expires_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + (7 * 86400);
 
@@ -42,6 +43,7 @@ impl OffloadClient {
         let mut context = Vec::new();
         context.extend_from_slice(&sender_pk.0);
         context.extend_from_slice(&expires_at.to_le_bytes());
+        context.extend_from_slice(&ciphertext);
         let (pow_token, pow_nonce) = zero_crypto::pow::generate_pow(&context, 18);
 
         let mut msg_to_sign = Vec::new();
@@ -59,6 +61,7 @@ impl OffloadClient {
             ciphertext,
             sender_sig,
             sender_pk,
+            sender_dht_pk,
             expires_at,
             pow_token,
             pow_nonce,

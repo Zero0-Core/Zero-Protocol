@@ -63,7 +63,7 @@ impl FriendSession {
         nonce[..8].copy_from_slice(&msg.sequence_number.to_le_bytes());
         
         let plaintext = zero_crypto::aead::decrypt(&msg_key, &nonce, &msg.ciphertext, &[])?;
-        self.recv_counter = msg.sequence_number;
+        self.recv_counter = msg.sequence_number + 1;
         Ok(plaintext)
     }
 }

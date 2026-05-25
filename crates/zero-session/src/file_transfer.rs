@@ -100,6 +100,12 @@ impl FileTransfer {
         if offset + chunk_size > self.file_size {
             return Err("Chunk exceeds file boundary");
         }
+        for (&e_offset, chunk) in &self.received_chunks {
+            let e_size = chunk.len() as u64;
+            if offset < e_offset + e_size && e_offset < offset + chunk_size {
+                return Err("Overlapping chunk detected");
+            }
+        }
         if !self.received_chunks.contains_key(&offset) {
             self.received_chunks.insert(offset, data);
             self.bytes_transferred = self.received_chunks.values().map(|v| v.len() as u64).sum();
@@ -289,5 +295,14 @@ mod tests {
     fn test_assemble_returns_none_if_not_complete() {
         let ft = FileTransfer::new_incoming(file_id(13), "f.bin".into(), 1024).unwrap();
         assert!(ft.assemble().is_none());
+    }
+
+    #[test]
+    fn test_overlapping_chunks_rejected() {
+        let mut ft = FileTransfer::new_incoming(file_id(14), "f.bin".into(), 1024).unwrap();
+        ft.receive_chunk(0, vec![0u8; 100]).unwrap();
+        
+        let res = ft.receive_chunk(50, vec![0u8; 100]);
+        assert!(res.is_err());
     }
 }

@@ -2,8 +2,9 @@ use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
-/// A long-term static keypair for X25519.
+/// A long-term static keypair for X25519, linked to Ed25519.
 pub struct StaticKeypair {
+    pub seed: Zeroizing<[u8; 32]>,
     pub private: Zeroizing<[u8; 32]>,
     pub public: [u8; 32],
 }
@@ -11,26 +12,27 @@ pub struct StaticKeypair {
 impl StaticKeypair {
     /// Generates a new static keypair using the OS random number generator.
     pub fn generate() -> Self {
-        let secret = StaticSecret::random_from_rng(OsRng);
-        let public = PublicKey::from(&secret);
-        Self {
-            private: Zeroizing::new(secret.to_bytes()),
-            public: public.to_bytes(),
-        }
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut OsRng, &mut seed);
+        Self::from_bytes(seed)
     }
 
-    /// Restores a keypair from raw private key bytes.
-    pub fn from_bytes(secret_bytes: [u8; 32]) -> Self {
-        let secret = StaticSecret::from(secret_bytes);
+    /// Restores a keypair from raw master seed bytes.
+    pub fn from_bytes(seed_bytes: [u8; 32]) -> Self {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+        let x25519_priv = signing_key.to_scalar_bytes();
+        let secret = StaticSecret::from(x25519_priv);
         let public = PublicKey::from(&secret);
         Self {
-            private: Zeroizing::new(secret.to_bytes()),
+            seed: Zeroizing::new(seed_bytes),
+            private: Zeroizing::new(x25519_priv),
             public: public.to_bytes(),
         }
     }
 }
 
 /// An ephemeral keypair for short-lived X25519 sessions.
+#[derive(Debug, Clone)]
 pub struct EphemeralKeypair {
     pub private: Zeroizing<[u8; 32]>,
     pub public: [u8; 32],

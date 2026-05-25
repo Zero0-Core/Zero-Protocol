@@ -3,6 +3,8 @@ use std::sync::Arc;
 use zero_dht::node::NodeInfo;
 use crate::NetError;
 use crate::udp::UdpManager;
+use crate::quic::QuicManager;
+use crate::tcp::TcpRelayManager;
 
 pub enum TransportType {
     Udp,
@@ -13,22 +15,30 @@ pub enum TransportType {
 
 pub struct TransportSelector {
     pub udp: Arc<UdpManager>,
-    // quic: Arc<QuicManager>,
+    pub quic: Option<Arc<QuicManager>>,
+    pub tcp_relay: Option<Arc<TcpRelayManager>>,
 }
 
 impl TransportSelector {
-    pub fn new(udp: Arc<UdpManager>) -> Self {
-        Self { udp }
+    pub fn new(
+        udp: Arc<UdpManager>,
+        quic: Option<Arc<QuicManager>>,
+        tcp_relay: Option<Arc<TcpRelayManager>>,
+    ) -> Self {
+        Self { udp, quic, tcp_relay }
     }
 
     /// Determines the best available transport for a given target peer.
-    pub fn best_transport_for(&self, _target: &NodeInfo) -> TransportType {
-        // Priority 1: Direct UDP (Preferred)
-        // Priority 2: QUIC
-        // Priority 3: TCP Relay Fallback
-        
-        // For now, default to direct UDP.
-        TransportType::Udp
+    pub fn best_transport_for(&self, target: &NodeInfo) -> TransportType {
+        if target.addr.ip().is_loopback() {
+            TransportType::Udp
+        } else if self.quic.is_some() {
+            TransportType::Quic
+        } else if self.tcp_relay.is_some() {
+            TransportType::TcpRelay(target.addr)
+        } else {
+            TransportType::Tor
+        }
     }
 
     pub async fn send_packet(&self, target: &NodeInfo, packet: &[u8]) -> Result<(), NetError> {
@@ -42,14 +52,28 @@ impl TransportSelector {
                 Ok(())
             }
             TransportType::Quic => {
-                // Implement QUIC sending logic
-                Err(NetError::TransportUnavailable)
+                if let Some(ref quic) = self.quic {
+                    quic.send_quic_packet(target.addr, packet).await
+                } else {
+                    Err(NetError::TransportUnavailable)
+                }
             }
-            TransportType::TcpRelay(_) => Err(NetError::TransportUnavailable),
+            TransportType::TcpRelay(_) => {
+                if let Some(ref relay) = self.tcp_relay {
+                    relay.send_relayed_packet(target.addr, packet).await
+                } else {
+                    Err(NetError::TransportUnavailable)
+                }
+            }
             TransportType::Tor => {
-                // SOCKS5 (Tor) proxy implementation
-                // tokio_socks::tcp::Socks5Stream::connect(...)
-                Err(NetError::TransportUnavailable)
+                let proxy_addr = "127.0.0.1:9050".parse::<SocketAddr>().unwrap();
+                let mut stream = tokio_socks::tcp::Socks5Stream::connect(proxy_addr, target.addr).await
+                    .map_err(|_| NetError::TransportUnavailable)?;
+                use tokio::io::AsyncWriteExt;
+                let len = (packet.len() as u32).to_be_bytes();
+                stream.write_all(&len).await.map_err(NetError::Io)?;
+                stream.write_all(packet).await.map_err(NetError::Io)?;
+                Ok(())
             }
         }
     }
